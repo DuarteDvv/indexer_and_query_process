@@ -9,7 +9,27 @@ from nltk.corpus import stopwords
 from nltk.stem import PorterStemmer
 from nltk.tokenize import word_tokenize
 import re
+import json
 
+STOP_WORDS = set(stopwords.words('english'))
+
+def save_partial_index_jsonl(index, path, idx_val, idx_lock):
+   """
+   Atomically save a partial inverted index to disk.
+   """
+   os.makedirs(path, exist_ok=True)
+   with idx_lock:
+      filename = os.path.join(path, f"partial_{idx_val.value}.jsonl")
+      idx_val.value += 1
+
+   with open(filename, 'w', encoding='utf-8') as f:
+      for term, postings in sorted(index.items()):
+         obj = {"term": term, "postings": postings}
+         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+         
+
+def unary_encode(f: int) -> str:
+   return "0"*f + "1"
 
 
 def preprocess(text):
@@ -20,12 +40,14 @@ def preprocess(text):
    # tokenize
    tokens = word_tokenize(text.lower())
    
+   # transform - and _ into space
+   tokens = [re.sub(r"[-_]", " ", tok) for tok in tokens]
+   
    # keep only alphanumeric tokens
    tokens = [tok for tok in tokens if re.match(r"^[a-z0-9]+$", tok)]
    
    # remove stopwords
-   stop_words = set(stopwords.words('english'))
-   tokens = [word for word in tokens if word not in stop_words]
+   tokens = [word for word in tokens if word not in STOP_WORDS]
    
    # Stem
    stemmer = PorterStemmer()
@@ -50,7 +72,7 @@ def read_args ():
 
    return args.memory, args.corpus, args.index
 
-def memory_used() -> int:
+def memory_used():
    """
    Returns the memory used by the process in megabytes.
    """
