@@ -16,13 +16,56 @@ import threading
 
 STOP_WORDS = set(stopwords.words('english'))
 
+
+def save_partial_document_index(document_index, index_path, idx_doc_index):
+   """
+   Save the partial document index to disk.
+   """
+   os.makedirs(index_path, exist_ok=True)
+   filename = os.path.join(index_path, f"partial_document_index_{idx_doc_index}.jsonl")
+   
+   with open(filename, 'w', encoding='utf-8') as f:
+      for doc_id, doc_info in sorted(document_index.items()):
+         obj = {"id": doc_id, "title": doc_info['title'], "length": doc_info['length']}
+         f.write(json.dumps(obj, ensure_ascii=False) + "\n")
+   
+   print(f"[Writer] Saved partial document index to {filename} with {len(document_index)} documents.")
+
+def append_partial_document_indexes(index_path):
+    
+   all_files = os.listdir(index_path)
+   
+   partial_files = [
+      f for f in all_files
+      if f.startswith("partial_document_index_") and f.endswith(".jsonl")
+   ]
+
+   partial_files.sort()
+
+   out_fname = os.path.join(index_path, "document_index.jsonl")
+   
+   with open(out_fname, 'w', encoding='utf-8') as out_f:
+      for fname in partial_files:
+         full_path = os.path.join(index_path, fname)
+         with open(full_path, 'r', encoding='utf-8') as in_f:
+               for line in in_f:
+                  out_f.write(line)
+
+   print(f"[Writer] Merged {len(partial_files)} partial document index files into {out_fname}.")
+
+   # remove partial files
+   for fname in partial_files:
+      os.remove(os.path.join(index_path, fname))
+                  
+
+
 def save_partial_index_jsonl(index, path, idx_val, idx_lock):
    """
    Atomically save a partial inverted index to disk.
    """
    os.makedirs(path, exist_ok=True)
    with idx_lock:
-      filename = os.path.join(path, f"partial_{idx_val.value}.jsonl")
+      filename = os.path.join(path, f"partial_inversed_{idx_val.value}.jsonl")
       idx_val.value += 1
 
    with open(filename, 'w', encoding='utf-8') as f:
@@ -61,7 +104,7 @@ def preprocess(text):
    tokens = [stemmer.stem(word) for word in tokens]
 
    # remove single character tokens
-   tokens = [word for word in tokens if len(word) > 2]
+   tokens = [word for word in tokens if len(word) > 1]
    
    return tokens
 
@@ -95,16 +138,21 @@ def memory_used():
 
 def merge_group(file_paths, output_path, final=False):
    """
-   Merge a list of partial index files into um único JSONL no output_path.
+   Merge a list of partial index files into a single JSONL at output_path.
    """
-   # abrir todos os índices parciais para leitura
+
+   if final:
+      number_of_terms = 0
+      sum_list_size = 0
+   
+   # open all partial index files for reading
    read_file_pointers = [open(path, 'r', encoding='utf-8') for path in file_paths]
    iterators = [iter(fp) for fp in read_file_pointers]
 
-   # preparar escrita
+   # prepare writing
    with open(output_path, 'w', encoding='utf-8') as write_fp:
       min_heap = []  # (term, idx, doc_list)
-      # inicializa heap
+      # initialize heap
       for i, it in enumerate(iterators):
          try:
             line = next(it)
@@ -113,12 +161,12 @@ def merge_group(file_paths, output_path, final=False):
          except StopIteration:
             pass
 
-      # loop de merge
+      # merge loop
       while min_heap:
          term, idx, doc_list = heapq.heappop(min_heap)
          merged_doc_list = doc_list.copy()
 
-         # avança esse iterador
+         # advance this iterator
          try:
             line = next(iterators[idx])
             content = json.loads(line)
@@ -126,7 +174,7 @@ def merge_group(file_paths, output_path, final=False):
          except StopIteration:
             pass
 
-         # mescla entradas com o mesmo termo
+         # merge entries with the same term
          while min_heap and min_heap[0][0] == term:
             _, other_idx, other_list = heapq.heappop(min_heap)
             merged_doc_list.extend(other_list)
@@ -137,60 +185,69 @@ def merge_group(file_paths, output_path, final=False):
             except StopIteration:
                pass
 
-         # agrega frequências
+         # aggregate frequencies
          agg = defaultdict(int)
          for doc_id, freq in merged_doc_list:
                agg[doc_id] += freq
 
-         # constrói lista final ou intermediária
+         # build final or intermediate list
          if final:
                final_list = [[doc_id, unary_encode(agg[doc_id])] for doc_id in sorted(agg)]
          else:
                final_list = [[doc_id, agg[doc_id]] for doc_id in sorted(agg)]
 
-         # monitora memória
-         print(f"Memória usada: {memory_used()} MB")
-
-         # escreve no arquivo
+         # write 
          write_fp.write(json.dumps({'term': term, 'doc_list': final_list}, ensure_ascii=False) + '\n')
 
-   # fecha todos os arquivos de leitura
+         if final:
+            number_of_terms += 1
+            sum_list_size += len(final_list)
+
+   # close all read files
    for fp in read_file_pointers:
       fp.close()
 
+   if final:
+      average_list_size = sum_list_size / number_of_terms if number_of_terms > 0 else 0
 
-def parallel_merge_partial_indexes(index_path, output_name='complete_index.jsonl'):
+      return number_of_terms, average_list_size
+
+
+def parallel_merge_partial_indexes(index_path, output_name='complete_inversed_index.jsonl'):
    """
-   Divide os arquivos parciais em grupos e mescla em paralelo usando threads.
+   Split the partial index files into groups and merge in parallel using threads.
    """
-   # lista de arquivos parciais
-   all_files = [f for f in os.listdir(index_path) if f.endswith('.jsonl')]
+   # list of partial index files
+   all_files = [f for f in os.listdir(index_path) if (f.startswith('partial_inversed_') and f.endswith('.jsonl'))]
    full_paths = [os.path.join(index_path, f) for f in all_files]
 
-   # define número de threads
+   # set number of threads
    num_workers = 4
    groups = [full_paths[i::num_workers] for i in range(num_workers)]
 
    threads = []
    intermediate_paths = []
 
-   # inicia threads para cada grupo
+   # start threads for each group
    for i, group in enumerate(groups):
+
       if not group:
          continue
+
       interm_path = os.path.join(index_path, f'intermediate_{i}.jsonl')
       intermediate_paths.append(interm_path)
+
       t = threading.Thread(target=merge_group, args=(group, interm_path, False), name=f"Thread-{i}")
       t.start()
       threads.append(t)
 
-   # aguarda todas as threads terminarem
+   # wait for all threads to finish
    for t in threads:
       t.join()
 
-   # merge final dos intermediários
+   # final merge of intermediates
    final_path = os.path.join(index_path, output_name)
-   merge_group(intermediate_paths, final_path, final=True)
+   number_of_terms, average_list_size = merge_group(intermediate_paths, final_path, final=True)
 
    # cleanup
    for ip in intermediate_paths:
@@ -200,3 +257,5 @@ def parallel_merge_partial_indexes(index_path, output_name='complete_index.jsonl
          pass
 
    print(f"Parallel merge complete. Final index at: {final_path}")
+
+   return number_of_terms, average_list_size
